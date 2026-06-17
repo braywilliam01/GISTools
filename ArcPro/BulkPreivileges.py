@@ -8,6 +8,6 @@ fcList = arcpy.ListFeatureClasses()
 
 for fc in fcList:    ##  arcpy.ChangePrivileges_management(in_dataset, user, {view_privileges}, {edit_privileges})
   arcpy.ChangePrivileges_management(fc, "USER1", "GRANT", "GRANT")
-  print fc
+  print (fc)
 
-print "Complete"
+print ("Completed")
