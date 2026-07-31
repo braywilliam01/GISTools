@@ -1,0 +1,17 @@
+import arcgis
+from arcgis.gis import GIS
+
+gis = GIS("pro")
+target_user = "user_name"
+
+groups = gis.groups.search(query="", max_groups=10000)
+print(f"Total groups found: {len(groups)}")
+
+for g in groups:
+    try:
+        result = g.add_users([target_user])
+        print(f"Success: Added to {g.title}")
+    except Exception as e:
+        print(f"Could NOT add to group: {g.title} -- {e}")
+
+print("All groups processed.")
