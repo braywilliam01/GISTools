@@ -1,4 +1,5 @@
 import json
+import sys
 import requests
 
 
@@ -196,43 +197,52 @@ def apply_edits(url, token, adds=None, updates=None):
     }
 
     r = requests.post(ae, data=payload)
+    r.raise_for_status()
     return r.json()
+
+
+def check_edit_result(result, label):
+    """Print any errors in an applyEdits response. Returns True if everything succeeded."""
+    if "error" in result:
+        print(f"  ERROR ({label}): {result['error']}")
+        return False
+
+    ok = True
+    for key in ("addResults", "updateResults", "deleteResults"):
+        for item in result.get(key, []):
+            if not item.get("success", True):
+                print(f"  ERROR ({label}, {key}): {item.get('error')}")
+                ok = False
+
+    return ok
 
 
 # -----------------------------------------------------------
 # MAIN WORKFLOW
 # -----------------------------------------------------------
 
-def process_layer(json_data, layer_url):
-    # Step 1 — load new features for this geometry type
-    pts, lines, polys = split_by_geometry(json_data)
-
-    # choose layer collection based on URL
-    if "FeatureServer/" + POINT_LAYER_ID in layer_url:
-        new_feats = pts
-    elif "FeatureServer/" + LINE_LAYER_ID in layer_url:
-        new_feats = lines
-    else:
-        new_feats = polys
-
-    # Step 2 — query existing records
+def process_layer(new_feats, layer_url):
+    # Step 1 — query existing records
     existing = query_existing(layer_url, TOKEN)
 
-    # Step 3 — build add/update sets
+    # Step 2 — build add/update sets
     adds, updates, new_ids = build_edit_batches(new_feats, existing)
 
-    # Step 4 — mark old NOTAMs
+    # Step 3 — mark old NOTAMs
     olds = build_old_status_updates(existing, new_ids)
 
-    # Step 5 — send adds + updates
+    # Step 4 — send adds + updates
     result_1 = apply_edits(layer_url, TOKEN, adds=adds, updates=updates)
+    ok_1 = check_edit_result(result_1, "adds/updates")
 
-    # Step 6 — send old-updates
+    # Step 5 — send old-updates
     result_2 = apply_edits(layer_url, TOKEN, adds=[], updates=olds)
+    ok_2 = check_edit_result(result_2, "mark-old")
 
     return {
         "adds": result_1,
-        "olds": result_2
+        "olds": result_2,
+        "success": ok_1 and ok_2
     }
 
 
@@ -244,16 +254,24 @@ def main():
     with open("Untitled-1.json", "r") as f:
         data = json.load(f)
 
+    pts, lines, polys = split_by_geometry(data)
+
     print("Processing Points...")
-    pts_result = process_layer(data, POINT_URL)
+    pts_result = process_layer(pts, POINT_URL)
 
     print("Processing Lines...")
-    line_result = process_layer(data, LINE_URL)
+    line_result = process_layer(lines, LINE_URL)
 
     print("Processing Polygons...")
-    poly_result = process_layer(data, POLY_URL)
+    poly_result = process_layer(polys, POLY_URL)
 
-    print("Done.")
+    all_ok = pts_result["success"] and line_result["success"] and poly_result["success"]
+
+    if all_ok:
+        print("Done.")
+    else:
+        print("Done — completed with errors, see above.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
