@@ -27,17 +27,17 @@ def _target_sde(before):
     if not target:
         return None, database, None
 
-    # Minimal match dict: avoid round-tripping the (masked) password that
-    # Item.connectionProperties returns, since arcpy would never see it match
-    # the layer's real stored credential and would silently skip the update.
-    match_info = {"workspace_factory": before.get("workspace_factory")}
-    connection_info = {}
+    # Minimal match dict: updateConnectionProperties expects the FLAT
+    # connection_info shape (same keys Esri's own examples use), not the
+    # {dataset, workspace_factory, connection_info: {...}} envelope that
+    # Item.connectionProperties returns. Also avoids round-tripping the
+    # (masked) password that envelope contains, which would never match
+    # the layer's real stored credential.
+    match_info = {}
     if info.get("instance"):
-        connection_info["instance"] = info["instance"]
+        match_info["instance"] = info["instance"]
     if info.get("database"):
-        connection_info["database"] = info["database"]
-    if connection_info:
-        match_info["connection_info"] = connection_info
+        match_info["database"] = info["database"]
 
     return target, database, match_info
 
