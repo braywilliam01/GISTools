@@ -14,7 +14,7 @@ NEW_SDE_BY_DATABASE = {
     "GISDEV": NEW_GISDEV,
 }
 
-_diag_logged = False
+SCRIPT_VERSION = "2026-09-30f-cim-based"
 
 
 def _target_sde(before):
@@ -23,26 +23,25 @@ def _target_sde(before):
     database = (info.get("database") or before.get("dataset", "").split(".")[0]).upper()
 
     if OLD_SERVER.upper() not in instance:
-        return None, database, None  # not on the old server, leave alone
+        return None, database  # not on the old server, leave alone
 
-    target = NEW_SDE_BY_DATABASE.get(database) or None
-    if not target:
-        return None, database, None
+    return NEW_SDE_BY_DATABASE.get(database) or None, database
 
-    # Identity-only match dict, nested under 'connection_info' per Esri's
-    # documented updateConnectionProperties example (a flat dict - what
-    # every prior attempt here used - matches nothing; the keys must sit
-    # one level down). Deliberately excludes user/password/
-    # authentication_mode/version since those vary layer-to-layer (users
-    # connect through different accounts to the same database) and would
-    # make the match too strict.
-    connection_info = {}
-    for key in ("server", "instance", "database", "dbclient", "db_connection_properties"):
-        if info.get(key):
-            connection_info[key] = info[key]
-    match_info = {"connection_info": connection_info}
 
-    return target, database, match_info
+def _get_data_connection(cim_def):
+    # Feature layers nest it under featureTable; standalone tables (and
+    # possibly other layer types) expose it directly.
+    try:
+        return cim_def.featureTable.dataConnection
+    except AttributeError:
+        return cim_def.dataConnection
+
+
+def _set_data_connection(cim_def, dc):
+    try:
+        cim_def.featureTable.dataConnection = dc
+    except AttributeError:
+        cim_def.dataConnection = dc
 
 
 def _repoint(item, map_name, is_layer):
@@ -64,7 +63,7 @@ def _repoint(item, map_name, is_layer):
     if not before or before.get("workspace_factory") != "SDE":
         return "skipped"
 
-    target, database, match_info = _target_sde(before)
+    target, database = _target_sde(before)
     if not target:
         return "skipped"
 
@@ -72,32 +71,34 @@ def _repoint(item, map_name, is_layer):
         arcpy.AddMessage(f"[DRY RUN] Would update {label} ({database}) -> {target}")
         return "updated"
 
+    # updateConnectionProperties is a confirmed Esri defect (BUG-000112574)
+    # that silently no-ops for non-group layers in some Pro versions -
+    # every attempt at fixing the match-dict shape here hit that same
+    # silent failure regardless of shape. Edit the CIM definition directly
+    # instead, the documented workaround: getDefinition/modify
+    # dataConnection.workspaceConnectionString/setDefinition.
     try:
-        # validate=False: default True silently no-ops the whole update if
-        # arcpy can't validate new_connection_info, with no exception - the
-        # likely reason every prior attempt here updated 0 items regardless
-        # of the current-match dict shape. Safe here because _verify_new_sde
-        # already confirmed each new .sde file actually connects, in main().
-        item.updateConnectionProperties(match_info, target, validate=False)
+        cim_def = item.getDefinition("V2")
+        dc = _get_data_connection(cim_def)
+        old_conn_str = dc.workspaceConnectionString
+        dc.workspaceConnectionString = f"DATABASE={target}"
+        _set_data_connection(cim_def, dc)
+        item.setDefinition(cim_def)
     except Exception as e:
         arcpy.AddWarning(f"Could not update {label}: {e}")
         return "failed"
 
-    after = item.connectionProperties
-    if after == before:
-        global _diag_logged
-        if not _diag_logged:
-            _diag_logged = True
-            arcpy.AddWarning(
-                f"DIAGNOSTIC (first no-op only) for {label}: "
-                f"match_info sent={match_info!r} | new_target={target!r} | "
-                f"before={before!r} | after={after!r}"
-            )
+    # Re-fetch a fresh CIM definition to verify - item.connectionProperties
+    # is unreliable/stale after an in-place edit (root cause of the bug
+    # above), so compare via getDefinition again instead.
+    after_dc = _get_data_connection(item.getDefinition("V2"))
+    if after_dc.workspaceConnectionString == old_conn_str:
+        arcpy.AddWarning(
+            f"No change detected for {label} after CIM update "
+            f"(old connection string={old_conn_str!r})"
+        )
         return "skipped"
     return "updated"
-
-
-SCRIPT_VERSION = "2026-09-30e-validate-false-with-preflight"
 
 
 def _verify_new_sde(database, path):
