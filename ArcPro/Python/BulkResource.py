@@ -92,7 +92,11 @@ def _repoint(item, map_name, is_layer):
     return "updated"
 
 
+SCRIPT_VERSION = "2026-09-30d-nested-connection-info"
+
+
 def main():
+    arcpy.AddMessage(f"BulkResource.py version: {SCRIPT_VERSION}")
     if not OLD_SERVER:
         raise ValueError("Old server name is required.")
     if not any([NEW_GISPROD, NEW_GISWORK, NEW_GISPUB, NEW_GISDEV]):
