@@ -42,15 +42,21 @@ def _target_sde(before):
     return target, database, match_info
 
 
-def _repoint(item, label, is_layer):
-    if is_layer and (item.isGroupLayer or item.isBasemapLayer):
-        return "skipped"
+def _repoint(item, map_name, is_layer):
+    # Some layer instances (broken/unsupported sources not caught by
+    # isGroupLayer/isBasemapLayer) raise AttributeError on almost any
+    # property access, not just connectionProperties - including .name.
+    # Guard the whole block rather than each attribute one at a time.
     try:
+        label = f"{map_name}/{item.name}"
+    except AttributeError:
+        label = f"{map_name}/<unsupported layer>"
+
+    try:
+        if is_layer and (item.isGroupLayer or item.isBasemapLayer):
+            return "skipped"
         before = item.connectionProperties
     except AttributeError:
-        # Some layer types (raster/tile/web-service/broken sources not
-        # caught by isGroupLayer/isBasemapLayer) don't expose this
-        # property at all and raise AttributeError just touching it.
         return "skipped"
     if not before or before.get("workspace_factory") != "SDE":
         return "skipped"
@@ -82,9 +88,9 @@ def main():
 
     for m in aprx.listMaps():
         for lyr in m.listLayers():
-            counts[_repoint(lyr, f"{m.name}/{lyr.name}", is_layer=True)] += 1
+            counts[_repoint(lyr, m.name, is_layer=True)] += 1
         for tbl in m.listTables():
-            counts[_repoint(tbl, f"{m.name}/{tbl.name}", is_layer=False)] += 1
+            counts[_repoint(tbl, m.name, is_layer=False)] += 1
 
     if not DRY_RUN:
         aprx.save()
