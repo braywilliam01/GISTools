@@ -1,17 +1,21 @@
 import arcpy
 
 OLD_SERVER = arcpy.GetParameterAsText(0)
-NEW_GISPROD = arcpy.GetParameterAsText(1)
-NEW_GISWORK = arcpy.GetParameterAsText(2)
-NEW_GISPUB = arcpy.GetParameterAsText(3)
-NEW_GISDEV = arcpy.GetParameterAsText(4)
-DRY_RUN = arcpy.GetParameterAsText(5) == "true"
+OLD_GISPROD = arcpy.GetParameterAsText(1)
+OLD_GISWORK = arcpy.GetParameterAsText(2)
+OLD_GISPUB = arcpy.GetParameterAsText(3)
+OLD_GISDEV = arcpy.GetParameterAsText(4)
+NEW_GISPROD = arcpy.GetParameterAsText(5)
+NEW_GISWORK = arcpy.GetParameterAsText(6)
+NEW_GISPUB = arcpy.GetParameterAsText(7)
+NEW_GISDEV = arcpy.GetParameterAsText(8)
+DRY_RUN = arcpy.GetParameterAsText(9) == "true"
 
-NEW_SDE_BY_DATABASE = {
-    "GISPROD": NEW_GISPROD,
-    "GISWORK": NEW_GISWORK,
-    "GISPUB": NEW_GISPUB,
-    "GISDEV": NEW_GISDEV,
+SDE_PAIRS_BY_DATABASE = {
+    "GISPROD": (OLD_GISPROD, NEW_GISPROD),
+    "GISWORK": (OLD_GISWORK, NEW_GISWORK),
+    "GISPUB": (OLD_GISPUB, NEW_GISPUB),
+    "GISDEV": (OLD_GISDEV, NEW_GISDEV),
 }
 
 _diag_logged = False
@@ -23,21 +27,13 @@ def _target_sde(before):
     database = (info.get("database") or before.get("dataset", "").split(".")[0]).upper()
 
     if OLD_SERVER.upper() not in instance:
-        return None, database, None  # not on the old server, leave alone
+        return None, None, database  # not on the old server, leave alone
 
-    target = NEW_SDE_BY_DATABASE.get(database) or None
-    if not target:
-        return None, database, None
+    old_sde, new_sde = SDE_PAIRS_BY_DATABASE.get(database, (None, None))
+    if not old_sde or not new_sde:
+        return None, None, database  # no old/new connection file configured yet
 
-    # Match dict: the full flat connection_info (same shape Esri's own
-    # examples use for current_connection_info), everything except the
-    # masked password - a 2-key subset (instance+database) silently
-    # matched nothing, so try the most complete dict that still avoids
-    # round-tripping a password value that could never equal the layer's
-    # real stored credential.
-    match_info = {k: v for k, v in info.items() if k != "password"}
-
-    return target, database, match_info
+    return old_sde, new_sde, database
 
 
 def _repoint(item, map_name, is_layer):
@@ -59,16 +55,16 @@ def _repoint(item, map_name, is_layer):
     if not before or before.get("workspace_factory") != "SDE":
         return "skipped"
 
-    target, database, match_info = _target_sde(before)
-    if not target:
+    old_sde, new_sde, database = _target_sde(before)
+    if not old_sde:
         return "skipped"
 
     if DRY_RUN:
-        arcpy.AddMessage(f"[DRY RUN] Would update {label} ({database}) -> {target}")
+        arcpy.AddMessage(f"[DRY RUN] Would update {label} ({database}) -> {new_sde}")
         return "updated"
 
     try:
-        item.updateConnectionProperties(match_info, target)
+        item.updateConnectionProperties(old_sde, new_sde)
     except Exception as e:
         arcpy.AddWarning(f"Could not update {label}: {e}")
         return "failed"
@@ -80,7 +76,7 @@ def _repoint(item, map_name, is_layer):
             _diag_logged = True
             arcpy.AddWarning(
                 f"DIAGNOSTIC (first no-op only) for {label}: "
-                f"match_info sent={match_info!r} | new_target={target!r} | "
+                f"old_sde={old_sde!r} | new_sde={new_sde!r} | "
                 f"before={before!r} | after={after!r}"
             )
         return "skipped"
@@ -90,8 +86,14 @@ def _repoint(item, map_name, is_layer):
 def main():
     if not OLD_SERVER:
         raise ValueError("Old server name is required.")
+    if not any([OLD_GISPROD, OLD_GISWORK, OLD_GISPUB, OLD_GISDEV]):
+        raise ValueError("At least one old .sde connection file is required.")
     if not any([NEW_GISPROD, NEW_GISWORK, NEW_GISPUB, NEW_GISDEV]):
         raise ValueError("At least one new .sde connection file is required.")
+
+    for db, (old_sde, new_sde) in SDE_PAIRS_BY_DATABASE.items():
+        if bool(old_sde) != bool(new_sde):
+            arcpy.AddWarning(f"{db}: only one of old/new connection file was set - skipping this database.")
 
     aprx = arcpy.mp.ArcGISProject("CURRENT")
     counts = {"updated": 0, "skipped": 0, "failed": 0}
