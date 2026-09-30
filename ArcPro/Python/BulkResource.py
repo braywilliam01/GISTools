@@ -73,7 +73,12 @@ def _repoint(item, map_name, is_layer):
         return "updated"
 
     try:
-        item.updateConnectionProperties(match_info, target)
+        # validate=False: default True silently no-ops the whole update if
+        # arcpy can't validate new_connection_info, with no exception - the
+        # likely reason every prior attempt here updated 0 items regardless
+        # of the current-match dict shape. Safe here because _verify_new_sde
+        # already confirmed each new .sde file actually connects, in main().
+        item.updateConnectionProperties(match_info, target, validate=False)
     except Exception as e:
         arcpy.AddWarning(f"Could not update {label}: {e}")
         return "failed"
@@ -92,7 +97,21 @@ def _repoint(item, map_name, is_layer):
     return "updated"
 
 
-SCRIPT_VERSION = "2026-09-30d-nested-connection-info"
+SCRIPT_VERSION = "2026-09-30e-validate-false-with-preflight"
+
+
+def _verify_new_sde(database, path):
+    """Actually connect and list contents - arcpy.Exists() only checks the
+    file is on disk, it doesn't prove the connection itself works. This
+    runs before any per-layer update so a bad new connection file fails
+    loudly here instead of causing a silent 0-updated run later."""
+    try:
+        old_workspace = arcpy.env.workspace
+        arcpy.env.workspace = path
+        arcpy.ListFeatureClasses()
+        arcpy.env.workspace = old_workspace
+    except Exception as e:
+        raise ValueError(f"New connection file for {database} failed to validate: {path} -> {e}")
 
 
 def main():
@@ -101,6 +120,11 @@ def main():
         raise ValueError("Old server name is required.")
     if not any([NEW_GISPROD, NEW_GISWORK, NEW_GISPUB, NEW_GISDEV]):
         raise ValueError("At least one new .sde connection file is required.")
+
+    for database, path in NEW_SDE_BY_DATABASE.items():
+        if path:
+            _verify_new_sde(database, path)
+            arcpy.AddMessage(f"Verified new connection for {database}: {path}")
 
     aprx = arcpy.mp.ArcGISProject("CURRENT")
     counts = {"updated": 0, "skipped": 0, "failed": 0}
