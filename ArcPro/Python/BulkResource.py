@@ -21,9 +21,25 @@ def _target_sde(before):
     database = (info.get("database") or before.get("dataset", "").split(".")[0]).upper()
 
     if OLD_SERVER.upper() not in instance:
-        return None, database  # not on the old server, leave alone
+        return None, database, None  # not on the old server, leave alone
 
-    return NEW_SDE_BY_DATABASE.get(database) or None, database
+    target = NEW_SDE_BY_DATABASE.get(database) or None
+    if not target:
+        return None, database, None
+
+    # Minimal match dict: avoid round-tripping the (masked) password that
+    # Item.connectionProperties returns, since arcpy would never see it match
+    # the layer's real stored credential and would silently skip the update.
+    match_info = {"workspace_factory": before.get("workspace_factory")}
+    connection_info = {}
+    if info.get("instance"):
+        connection_info["instance"] = info["instance"]
+    if info.get("database"):
+        connection_info["database"] = info["database"]
+    if connection_info:
+        match_info["connection_info"] = connection_info
+
+    return target, database, match_info
 
 
 def _repoint(item, label, is_layer):
@@ -33,7 +49,7 @@ def _repoint(item, label, is_layer):
     if not before or before.get("workspace_factory") != "SDE":
         return "skipped"
 
-    target, database = _target_sde(before)
+    target, database, match_info = _target_sde(before)
     if not target:
         return "skipped"
 
@@ -42,7 +58,7 @@ def _repoint(item, label, is_layer):
         return "updated"
 
     try:
-        item.updateConnectionProperties(before, target)
+        item.updateConnectionProperties(match_info, target)
     except Exception as e:
         arcpy.AddWarning(f"Could not update {label}: {e}")
         return "failed"
