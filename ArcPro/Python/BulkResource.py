@@ -29,18 +29,18 @@ def _target_sde(before):
     if not target:
         return None, database, None
 
-    # Identity-only match dict: server/database/dbclient say WHICH
-    # physical database this is, deliberately excluding user/password/
+    # Identity-only match dict, nested under 'connection_info' per Esri's
+    # documented updateConnectionProperties example (a flat dict - what
+    # every prior attempt here used - matches nothing; the keys must sit
+    # one level down). Deliberately excludes user/password/
     # authentication_mode/version since those vary layer-to-layer (users
     # connect through different accounts to the same database) and would
-    # make the match too strict. is_geodatabase isn't exposed by
-    # Item.connectionProperties at all but is present in a real .sde
-    # connection file's stored properties - add it explicitly since its
-    # absence may be why two prior dict shapes silently matched nothing.
-    match_info = {"is_geodatabase": True}
+    # make the match too strict.
+    connection_info = {}
     for key in ("server", "instance", "database", "dbclient", "db_connection_properties"):
         if info.get(key):
-            match_info[key] = info[key]
+            connection_info[key] = info[key]
+    match_info = {"connection_info": connection_info}
 
     return target, database, match_info
 
