@@ -45,7 +45,13 @@ def _target_sde(before):
 def _repoint(item, label, is_layer):
     if is_layer and (item.isGroupLayer or item.isBasemapLayer):
         return "skipped"
-    before = item.connectionProperties
+    try:
+        before = item.connectionProperties
+    except AttributeError:
+        # Some layer types (raster/tile/web-service/broken sources not
+        # caught by isGroupLayer/isBasemapLayer) don't expose this
+        # property at all and raise AttributeError just touching it.
+        return "skipped"
     if not before or before.get("workspace_factory") != "SDE":
         return "skipped"
 
