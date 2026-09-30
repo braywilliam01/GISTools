@@ -14,6 +14,8 @@ NEW_SDE_BY_DATABASE = {
     "GISDEV": NEW_GISDEV,
 }
 
+_diag_logged = False
+
 
 def _target_sde(before):
     info = before.get("connection_info", {}) or {}
@@ -27,17 +29,13 @@ def _target_sde(before):
     if not target:
         return None, database, None
 
-    # Minimal match dict: updateConnectionProperties expects the FLAT
-    # connection_info shape (same keys Esri's own examples use), not the
-    # {dataset, workspace_factory, connection_info: {...}} envelope that
-    # Item.connectionProperties returns. Also avoids round-tripping the
-    # (masked) password that envelope contains, which would never match
-    # the layer's real stored credential.
-    match_info = {}
-    if info.get("instance"):
-        match_info["instance"] = info["instance"]
-    if info.get("database"):
-        match_info["database"] = info["database"]
+    # Match dict: the full flat connection_info (same shape Esri's own
+    # examples use for current_connection_info), everything except the
+    # masked password - a 2-key subset (instance+database) silently
+    # matched nothing, so try the most complete dict that still avoids
+    # round-tripping a password value that could never equal the layer's
+    # real stored credential.
+    match_info = {k: v for k, v in info.items() if k != "password"}
 
     return target, database, match_info
 
@@ -74,7 +72,19 @@ def _repoint(item, map_name, is_layer):
     except Exception as e:
         arcpy.AddWarning(f"Could not update {label}: {e}")
         return "failed"
-    return "updated" if item.connectionProperties != before else "skipped"
+
+    after = item.connectionProperties
+    if after == before:
+        global _diag_logged
+        if not _diag_logged:
+            _diag_logged = True
+            arcpy.AddWarning(
+                f"DIAGNOSTIC (first no-op only) for {label}: "
+                f"match_info sent={match_info!r} | new_target={target!r} | "
+                f"before={before!r} | after={after!r}"
+            )
+        return "skipped"
+    return "updated"
 
 
 def main():
