@@ -168,11 +168,39 @@ def _most_common(values, default=None):
         return default
     return max(values, key=values.count)
 
-def _mark_presence_columns(row, inputs, present_fcs):
-    """Shared by write_schema_csv and write_unique_csv: one True/False column per
-    input FC showing whether that FC is among present_fcs for this row's field."""
+def build_fc_labels(inputs):
+    """
+    Maps each full FC catalog path to a short display label -- the last two
+    path components (e.g. "AVNGISDB02-GISProd.sde/DBO.ElecLightPole" instead
+    of the full Favorites/SDE-connection path) -- for use as CSV column
+    headers and the UniqueFields.csv SourceFC value. The full path is still
+    what's used internally for every lookup and in warning messages (so
+    there's always a path to act on); only the display text is shortened.
+
+    If two inputs would produce the same short label (rare, but possible with
+    same-named tables under differently-named connections), the colliding
+    ones grow by one more path component each until they're unique again,
+    so two distinct feature classes never share one CSV column header.
+    """
+    labels = {}
+    taken = set()
     for fc in inputs:
-        row[fc] = fc in present_fcs
+        parts = [p for p in re.split(r'[\\/]+', fc.rstrip('\\/')) if p]
+        n = min(2, len(parts)) or 1
+        label = "/".join(parts[-n:]) if parts else fc
+        while label in taken and n < len(parts):
+            n += 1
+            label = "/".join(parts[-n:])
+        labels[fc] = label
+        taken.add(label)
+    return labels
+
+def _mark_presence_columns(row, inputs, fc_labels, present_fcs):
+    """Shared by write_schema_csv and write_unique_csv: one True/False column per
+    input FC (keyed by its short display label) showing whether that FC is
+    among present_fcs for this row's field."""
+    for fc in inputs:
+        row[fc_labels[fc]] = fc in present_fcs
 
 def compute_ever_populated(common_index, treat_empty_as_null=True):
     """
@@ -433,7 +461,7 @@ def _atomic_write_all(write_specs):
                     pass
         raise
 
-def write_schema_csv(proposed_schema, common_index, ever_populated, inputs, path):
+def write_schema_csv(proposed_schema, common_index, ever_populated, inputs, fc_labels, path):
     """
     One row per proposed field:
       - Type: the single type actually used for the field mapping (promoted
@@ -451,13 +479,14 @@ def write_schema_csv(proposed_schema, common_index, ever_populated, inputs, path
         treat_empty_as_null), False if every record across every source
         that could actually be checked is null (and empty, if that flag is
         on), or "Unknown" if every contributing FC's record scan failed.
-      - One True/False column per input FC showing whether that FC
-        contributed this field. Since a field only needs to be present on
-        COMMON_THRESHOLD_FRACTION (51%) of the inputs to make the proposed
-        schema, not all of them, this can genuinely be False for some FCs.
+      - One True/False column per input FC (header = that FC's short label,
+        see build_fc_labels) showing whether that FC contributed this field.
+        Since a field only needs to be present on COMMON_THRESHOLD_FRACTION
+        (51%) of the inputs to make the proposed schema, not all of them,
+        this can genuinely be False for some FCs.
     """
     fieldnames = ["FieldName","Alias","Type","SourceTypes","Length",
-                  "SuggestedDomain","HadConflict","EverPopulated"] + list(inputs)
+                  "SuggestedDomain","HadConflict","EverPopulated"] + [fc_labels[fc] for fc in inputs]
     rows = []
     for p in proposed_schema:
         present_fcs = {fc for fc, _ in common_index.get(p["_normKey"], [])}
@@ -472,28 +501,30 @@ def write_schema_csv(proposed_schema, common_index, ever_populated, inputs, path
             "HadConflict": p.get("hadConflict"),
             "EverPopulated": "Unknown" if ev is None else ev
         }
-        _mark_presence_columns(row, inputs, present_fcs)
+        _mark_presence_columns(row, inputs, fc_labels, present_fcs)
         rows.append(row)
     _write_dict_csv(path, fieldnames, rows)
 
-def write_unique_csv(unique_index, inputs, path):
+def write_unique_csv(unique_index, inputs, fc_labels, path):
     """
     Fields that fell below the COMMON_THRESHOLD_FRACTION (51%) presence
-    threshold. One row per (source FC, field) instance, plus one True/False
-    column per input FC showing every FC this field's normalized name is
-    present on -- so from any single row you can see both the exact field
-    name/type/length as it exists in that one source, and the field's full
-    presence footprint across all the inputs.
+    threshold. One row per (source FC, field) instance -- SourceFC shown as
+    its short label, see build_fc_labels -- plus one True/False column per
+    input FC showing every FC this field's normalized name is present on --
+    so from any single row you can see both the exact field name/type/length
+    as it exists in that one source, and the field's full presence footprint
+    across all the inputs.
     """
     total_fc_count = len(inputs)
-    fieldnames = ["SourceFC","FieldName","Alias","Type","Length","PresentOnFCCount","TotalFCCount"] + list(inputs)
+    fieldnames = ["SourceFC","FieldName","Alias","Type","Length","PresentOnFCCount","TotalFCCount"] + \
+                 [fc_labels[fc] for fc in inputs]
     rows = []
     for k, entries in sorted(unique_index.items()):
         present_fcs = {fc for fc, _ in entries}
         present_count = len(entries)
         for fc, f in entries:
             row = {
-                "SourceFC": fc,
+                "SourceFC": fc_labels[fc],
                 "FieldName": f.name,
                 "Alias": f.aliasName,
                 "Type": f.type,
@@ -501,7 +532,7 @@ def write_unique_csv(unique_index, inputs, path):
                 "PresentOnFCCount": present_count,
                 "TotalFCCount": total_fc_count
             }
-            _mark_presence_columns(row, inputs, present_fcs)
+            _mark_presence_columns(row, inputs, fc_labels, present_fcs)
             rows.append(row)
     _write_dict_csv(path, fieldnames, rows)
 
@@ -611,6 +642,7 @@ class ConsolidateSchemas(object):
                 "Only one input feature class was provided; the proposed schema will just mirror that "
                 "FC's own schema, and UniqueFields.csv will be empty.")
         arcpy.AddMessage("Analyzing {} feature classes...".format(len(inputs)))
+        fc_labels = build_fc_labels(inputs)
         try:
             os.makedirs(out_folder, exist_ok=True)
         except OSError as e:
@@ -655,9 +687,9 @@ class ConsolidateSchemas(object):
         fieldmap_path = None
         write_specs = [
             (os.path.join(out_folder, DEFAULT_SCHEMA_CSV),
-                lambda p: write_schema_csv(proposed, common_index, ever_populated, inputs, p)),
+                lambda p: write_schema_csv(proposed, common_index, ever_populated, inputs, fc_labels, p)),
             (os.path.join(out_folder, DEFAULT_UNIQUE_CSV),
-                lambda p: write_unique_csv(unique_index, inputs, p)),
+                lambda p: write_unique_csv(unique_index, inputs, fc_labels, p)),
         ]
         if do_fieldmap:
             fieldmap_content = build_fieldmap_content(proposed, common_index, merge_rule)
