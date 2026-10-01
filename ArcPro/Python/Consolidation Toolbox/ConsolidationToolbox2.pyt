@@ -4,10 +4,10 @@
 # Compares the schemas of multiple feature classes and produces exactly
 # three outputs:
 #   1. Consolidated_TargetSchema.csv - the proposed schema (field name, alias,
-#      type, length), built from fields present on at least
-#      COMMON_THRESHOLD_FRACTION (51%) of the input feature classes -- not
-#      necessarily all of them, so the per-FC True/False columns can
-#      genuinely be False for some rows. When sources disagree on type,
+#      type, length), built from fields present on at least the "Common
+#      Field Presence Threshold" parameter's percentage (default 51%) of the
+#      input feature classes -- not necessarily all of them, so the per-FC
+#      True/False columns can genuinely be False for some rows. When sources disagree on type,
 #      SourceTypes shows every type seen, slash-separated (e.g.
 #      "Double/Integer"), while Type keeps the single promoted type actually
 #      used for the field mapping -- numeric conflicts resolve to the
@@ -21,7 +21,7 @@
 #      or "Unknown" if every contributing FC's record scan failed outright
 #      (so a real "all null" never gets confused with "couldn't check").
 #      Written as utf-8-sig so Excel renders non-ASCII characters correctly.
-#   2. UniqueFields.csv - fields that fell below the 51% presence threshold,
+#   2. UniqueFields.csv - fields that fell below the presence threshold,
 #      and are therefore NOT part of the proposed schema. One row per
 #      (source FC, field) instance showing the exact name/type/length as it
 #      exists in that source, plus one True/False column per input FC
@@ -38,11 +38,13 @@ import math
 from collections import defaultdict
 
 # -------------------- Config --------------------
-# A field only needs to be present on this fraction of the input FCs (not
+# Default for the "Common Field Presence Threshold (%)" tool parameter -- a
+# field only needs to be present on this percentage of the input FCs (not
 # necessarily all of them) to be included in the proposed schema; everything
-# below the threshold goes to UniqueFields.csv instead. required_count is
-# ceil(total_fc_count * COMMON_THRESHOLD_FRACTION) -- see split_common_and_unique().
-COMMON_THRESHOLD_FRACTION = 0.51
+# below the threshold goes to UniqueFields.csv instead. See
+# split_common_and_unique() for how the actual (possibly user-overridden)
+# value is turned into a required FC count.
+DEFAULT_COMMON_THRESHOLD_PCT = 51
 
 # System/geometry fields excluded by type (robust regardless of naming convention).
 # Blob/Raster are excluded too: arcpy.da.SearchCursor can't read Blob fields at
@@ -135,16 +137,16 @@ def build_field_index(fc_list, fields_by_fc):
             index[k].append((fc, f))
     return index
 
-def split_common_and_unique(field_index, total_fc_count):
+def split_common_and_unique(field_index, total_fc_count, threshold_pct):
     """
-    Fields present on at least COMMON_THRESHOLD_FRACTION (51%) of the input
-    FCs feed the proposed schema and field mapping. Everything below that
-    threshold is reported separately instead of being folded into the
-    proposed schema. A field can now be "common" without being on every
-    single input -- the per-FC True/False columns in the schema CSV reflect
-    that gap instead of being constant True.
+    Fields present on at least threshold_pct% of the input FCs feed the
+    proposed schema and field mapping. Everything below that threshold is
+    reported separately instead of being folded into the proposed schema. A
+    field can now be "common" without being on every single input -- the
+    per-FC True/False columns in the schema CSV reflect that gap instead of
+    being constant True.
     """
-    required_count = math.ceil(total_fc_count * COMMON_THRESHOLD_FRACTION) if total_fc_count else 0
+    required_count = math.ceil(total_fc_count * threshold_pct / 100.0) if total_fc_count else 0
     common_index = {}
     unique_index = {}
     for k, entries in field_index.items():
@@ -481,9 +483,9 @@ def write_schema_csv(proposed_schema, common_index, ever_populated, inputs, fc_l
         on), or "Unknown" if every contributing FC's record scan failed.
       - One True/False column per input FC (header = that FC's short label,
         see build_fc_labels) showing whether that FC contributed this field.
-        Since a field only needs to be present on COMMON_THRESHOLD_FRACTION
-        (51%) of the inputs to make the proposed schema, not all of them,
-        this can genuinely be False for some FCs.
+        Since a field only needs to clear the "Common Field Presence
+        Threshold" parameter's percentage of the inputs to make the proposed
+        schema, not all of them, this can genuinely be False for some FCs.
     """
     fieldnames = ["FieldName","Alias","Type","SourceTypes","Length",
                   "SuggestedDomain","HadConflict","EverPopulated"] + [fc_labels[fc] for fc in inputs]
@@ -507,8 +509,8 @@ def write_schema_csv(proposed_schema, common_index, ever_populated, inputs, fc_l
 
 def write_unique_csv(unique_index, inputs, fc_labels, path):
     """
-    Fields that fell below the COMMON_THRESHOLD_FRACTION (51%) presence
-    threshold. One row per (source FC, field) instance -- SourceFC shown as
+    Fields that fell below the "Common Field Presence Threshold" parameter's
+    percentage. One row per (source FC, field) instance -- SourceFC shown as
     its short label, see build_fc_labels -- plus one True/False column per
     input FC showing every FC this field's normalized name is present on --
     so from any single row you can see both the exact field name/type/length
@@ -548,9 +550,9 @@ class ConsolidateSchemas(object):
         self.label = "Analyze & Propose Consolidated Schema (CSV + FieldMappings)"
         self.description = (
             "Compare multiple feature classes and propose a consolidated schema built from fields present "
-            "on at least {:.0f}% of the inputs. Exports: the proposed schema (CSV), fields that fell below "
-            "that threshold (CSV), and a FieldMappings preset (.fieldmap) for the proposed schema.".format(
-                COMMON_THRESHOLD_FRACTION * 100)
+            "on at least the Common Field Presence Threshold percentage of the inputs (default {:.0f}%). "
+            "Exports: the proposed schema (CSV), fields that fell below that threshold (CSV), and a "
+            "FieldMappings preset (.fieldmap) for the proposed schema.".format(DEFAULT_COMMON_THRESHOLD_PCT)
         )
         self.canRunInBackground = True
 
@@ -601,7 +603,18 @@ class ConsolidateSchemas(object):
         )
         p_treat_empty.value = True
 
-        return [p_fcs, p_out, p_export, p_rule, p_treat_empty]
+        p_threshold = arcpy.Parameter(
+            displayName="Common Field Presence Threshold (%)",
+            name="common_threshold_pct",
+            datatype="GPLong",
+            parameterType="Optional",
+            direction="Input"
+        )
+        p_threshold.value = DEFAULT_COMMON_THRESHOLD_PCT
+        p_threshold.filter.type = "Range"
+        p_threshold.filter.list = [1, 100]
+
+        return [p_fcs, p_out, p_export, p_rule, p_treat_empty, p_threshold]
 
     def updateParameters(self, params):
         p_export = params[2]
@@ -625,6 +638,10 @@ class ConsolidateSchemas(object):
         do_fieldmap = bool(params[2].value) if params[2].value is not None else True
         merge_rule = params[3].valueAsText or "First"
         treat_empty_as_null = bool(params[4].value) if params[4].value is not None else True
+        threshold_pct = params[5].value if params[5].value is not None else DEFAULT_COMMON_THRESHOLD_PCT
+        # The Range filter only protects the interactive GP dialog -- clamp here too
+        # in case this tool is ever called directly from a script with an out-of-range value.
+        threshold_pct = max(1, min(100, int(threshold_pct)))
 
         # 1) Inputs & Validation
         inputs = [str(row[0]) for row in vt if row and row[0]]
@@ -653,7 +670,7 @@ class ConsolidateSchemas(object):
         # Fails clearly and names the offending FC rather than letting a
         # locked/moved/inaccessible input kill the run with a raw traceback --
         # and rather than silently dropping it, which would quietly change the
-        # FC count the 51% presence threshold is computed against.
+        # FC count the presence threshold is computed against.
         fields_by_fc = {}
         for fc in inputs:
             try:
@@ -662,15 +679,15 @@ class ConsolidateSchemas(object):
                 raise RuntimeError("Could not read fields from '{}': {}".format(fc, e))
         field_index = build_field_index(inputs, fields_by_fc)
 
-        # 3) Split into fields meeting the 51% presence threshold (feed the
+        # 3) Split into fields meeting the presence threshold (feed the
         # proposed schema) vs fields that fell below it (reported, but
         # excluded from the proposed schema).
-        common_index, unique_index = split_common_and_unique(field_index, len(inputs))
+        common_index, unique_index = split_common_and_unique(field_index, len(inputs), threshold_pct)
         if not common_index:
             arcpy.AddWarning(
-                "0 fields met the {:.0f}% presence threshold across these inputs -- the proposed schema, "
+                "0 fields met the {}% presence threshold across these inputs -- the proposed schema, "
                 "field map, and per-FC columns will all be empty. Every input field will be listed in "
-                "UniqueFields.csv instead.".format(COMMON_THRESHOLD_FRACTION * 100))
+                "UniqueFields.csv instead.".format(threshold_pct))
 
         # 4) Proposed schema, built only from fields meeting the threshold
         proposed = propose_schema(common_index)
