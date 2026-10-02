@@ -24,7 +24,10 @@
 #   2. UniqueFields.csv - fields that fell below the presence threshold,
 #      and are therefore NOT part of the proposed schema. One row per
 #      (source FC, field) instance showing the exact name/type/length as it
-#      exists in that source, plus one True/False column per input FC
+#      exists in that source, that row's own EverPopulated status (scoped to
+#      just that one source FC, not aggregated across every FC the field is
+#      present on -- so a field on 3/10 FCs where only one has data shows
+#      True on only that FC's row), plus one True/False column per input FC
 #      showing every FC that field is present on. Also utf-8-sig.
 #   3. consolidation.fieldmap - an arcpy.FieldMappings preset, built from the
 #      proposed schema, importable directly into the ArcGIS Merge/Append
@@ -204,35 +207,37 @@ def _mark_presence_columns(row, inputs, fc_labels, present_fcs):
     for fc in inputs:
         row[fc_labels[fc]] = fc in present_fcs
 
-def compute_ever_populated(common_index, treat_empty_as_null=True):
+def compute_ever_populated_per_source(common_index, unique_index, treat_empty_as_null=True):
     """
-    For each common field, check whether ANY contributing FC has at least
-    one record where that field is non-null. When treat_empty_as_null is
-    True (the default), an empty string also counts as unused -- a text
-    field full of "" reads the same as one full of NULL. When False, only
-    an actual database NULL counts; an explicitly-recorded empty string
-    counts as populated.
+    For every field instance in either common_index or unique_index, check
+    whether its own source FC has at least one record where that field is
+    non-null. When treat_empty_as_null is True (the default), an empty
+    string also counts as unused -- a text field full of "" reads the same
+    as one full of NULL. When False, only an actual database NULL counts;
+    an explicitly-recorded empty string counts as populated.
 
-    Returns dict: normKey -> True / False / None. None means "couldn't be
-    determined" because every FC contributing this field failed its record
-    scan (locked table, dropped connection, etc.) -- False is reserved for
-    "every record we were actually able to check was null/empty", so the two
-    cases are never conflated.
+    Returns dict: (fc, normKey) -> True / False / None. None means
+    "couldn't be determined" because that FC's record scan failed (locked
+    table, dropped connection, etc.) -- False is reserved for "every record
+    we were actually able to check was null/empty", so the two cases are
+    never conflated.
 
-    Scans each FC once with a single SearchCursor covering every one of
-    that FC's contributing field names (not once per field), short-
-    circuiting a field as soon as one non-null value is found anywhere.
-    This is a real table scan per input FC -- on very large feature classes
-    this step will take noticeably longer than the schema-only comparison.
+    Common and unique fields partition every input FC's fields (a given
+    field's normKey is entirely in one index or the other), so this scans
+    each FC exactly once with a single SearchCursor covering every one of
+    its contributing field names from both indexes together (not once per
+    field, and not once per index) -- short-circuiting a field as soon as
+    one non-null value is found anywhere. This is a real table scan per
+    input FC -- on very large feature classes this step will take
+    noticeably longer than the schema-only comparison.
     """
     ever_populated = {}
-    contributing_fcs = defaultdict(set)
     pending_by_fc = defaultdict(dict)  # fc -> {source_field_name: normKey}
-    for key, entries in common_index.items():
-        ever_populated[key] = False
-        for fc, f in entries:
-            pending_by_fc[fc][f.name] = key
-            contributing_fcs[key].add(fc)
+    for index in (common_index, unique_index):
+        for key, entries in index.items():
+            for fc, f in entries:
+                pending_by_fc[fc][f.name] = key
+                ever_populated[(fc, key)] = False
 
     scan_failed_fcs = set()
     for fc, field_map in pending_by_fc.items():
@@ -250,7 +255,7 @@ def compute_ever_populated(common_index, treat_empty_as_null=True):
                             continue
                         is_populated = val is not None and (not treat_empty_as_null or val != "")
                         if is_populated:
-                            ever_populated[field_map[fname]] = True
+                            ever_populated[(fc, field_map[fname])] = True
                             remaining.discard(fname)
         except RuntimeError as e:
             # arcpy.da cursor failures (locked table, schema issue, dropped
@@ -262,9 +267,30 @@ def compute_ever_populated(common_index, treat_empty_as_null=True):
             arcpy.AddWarning("Could not scan records of {} to check for populated fields: {}".format(fc, e))
             scan_failed_fcs.add(fc)
 
-    for key, fcs in contributing_fcs.items():
-        if not ever_populated[key] and (fcs & scan_failed_fcs):
+    if scan_failed_fcs:
+        for key in list(ever_populated.keys()):
+            fc, _ = key
+            if not ever_populated[key] and fc in scan_failed_fcs:
+                ever_populated[key] = None
+    return ever_populated
+
+def aggregate_ever_populated(common_index, ever_populated_per_source):
+    """
+    Collapses the per-(fc, normKey) results down to one value per common
+    field, for Consolidated_TargetSchema.csv's single EverPopulated column:
+    True if ANY contributing FC is populated, None if none are True but at
+    least one contributing FC's scan failed (so a real "all null" never
+    gets confused with "couldn't check"), else False.
+    """
+    ever_populated = {}
+    for key, entries in common_index.items():
+        vals = [ever_populated_per_source.get((fc, key), False) for fc, _ in entries]
+        if any(v is True for v in vals):
+            ever_populated[key] = True
+        elif any(v is None for v in vals):
             ever_populated[key] = None
+        else:
+            ever_populated[key] = False
     return ever_populated
 
 def _promote_type(types_set):
@@ -477,10 +503,11 @@ def write_schema_csv(proposed_schema, common_index, ever_populated, inputs, fc_l
       - HadConflict: True if sources disagreed on type, length, and/or raw
         name for this field.
       - EverPopulated: True if any contributing FC has at least one record
-        counted as populated for that field (see compute_ever_populated's
-        treat_empty_as_null), False if every record across every source
-        that could actually be checked is null (and empty, if that flag is
-        on), or "Unknown" if every contributing FC's record scan failed.
+        counted as populated for that field (see
+        compute_ever_populated_per_source's treat_empty_as_null), False if
+        every record across every source that could actually be checked is
+        null (and empty, if that flag is on), or "Unknown" if every
+        contributing FC's record scan failed.
       - One True/False column per input FC (header = that FC's short label,
         see build_fc_labels) showing whether that FC contributed this field.
         Since a field only needs to clear the "Common Field Presence
@@ -507,7 +534,7 @@ def write_schema_csv(proposed_schema, common_index, ever_populated, inputs, fc_l
         rows.append(row)
     _write_dict_csv(path, fieldnames, rows)
 
-def write_unique_csv(unique_index, inputs, fc_labels, path):
+def write_unique_csv(unique_index, ever_populated_per_source, inputs, fc_labels, path):
     """
     Fields that fell below the "Common Field Presence Threshold" parameter's
     percentage. One row per (source FC, field) instance -- SourceFC shown as
@@ -516,21 +543,29 @@ def write_unique_csv(unique_index, inputs, fc_labels, path):
     so from any single row you can see both the exact field name/type/length
     as it exists in that one source, and the field's full presence footprint
     across all the inputs.
+
+    EverPopulated is scoped to that one row's own source FC, not aggregated
+    across every FC the field is present on -- so a field present on 3 of 10
+    FCs where only one of those three actually has data shows True only on
+    that FC's row, False on the other two. "Unknown" means that row's own FC
+    failed its record scan (see compute_ever_populated_per_source).
     """
     total_fc_count = len(inputs)
-    fieldnames = ["SourceFC","FieldName","Alias","Type","Length","PresentOnFCCount","TotalFCCount"] + \
+    fieldnames = ["SourceFC","FieldName","Alias","Type","Length","EverPopulated","PresentOnFCCount","TotalFCCount"] + \
                  [fc_labels[fc] for fc in inputs]
     rows = []
     for k, entries in sorted(unique_index.items()):
         present_fcs = {fc for fc, _ in entries}
         present_count = len(entries)
         for fc, f in entries:
+            ev = ever_populated_per_source.get((fc, k), False)
             row = {
                 "SourceFC": fc_labels[fc],
                 "FieldName": f.name,
                 "Alias": f.aliasName,
                 "Type": f.type,
                 "Length": f.length or 0,
+                "EverPopulated": "Unknown" if ev is None else ev,
                 "PresentOnFCCount": present_count,
                 "TotalFCCount": total_fc_count
             }
@@ -692,9 +727,14 @@ class ConsolidateSchemas(object):
         # 4) Proposed schema, built only from fields meeting the threshold
         proposed = propose_schema(common_index)
 
-        # 4b) Scan actual records to flag fields where every source is null/empty
+        # 4b) Scan actual records to flag fields where every source is null/empty.
+        # Covers common AND unique fields in one pass per FC (see
+        # compute_ever_populated_per_source), then collapses the common-field
+        # half down to the single aggregated column write_schema_csv expects.
         arcpy.AddMessage("Scanning records for populated vs. all-null fields...")
-        ever_populated = compute_ever_populated(common_index, treat_empty_as_null=treat_empty_as_null)
+        ever_populated_per_source = compute_ever_populated_per_source(
+            common_index, unique_index, treat_empty_as_null=treat_empty_as_null)
+        ever_populated = aggregate_ever_populated(common_index, ever_populated_per_source)
 
         # 5) FieldMappings preset content (optional), built from the proposed
         # schema. Writing it to disk is deferred to the atomic-write step below,
@@ -706,7 +746,7 @@ class ConsolidateSchemas(object):
             (os.path.join(out_folder, DEFAULT_SCHEMA_CSV),
                 lambda p: write_schema_csv(proposed, common_index, ever_populated, inputs, fc_labels, p)),
             (os.path.join(out_folder, DEFAULT_UNIQUE_CSV),
-                lambda p: write_unique_csv(unique_index, inputs, fc_labels, p)),
+                lambda p: write_unique_csv(unique_index, ever_populated_per_source, inputs, fc_labels, p)),
         ]
         if do_fieldmap:
             fieldmap_content = build_fieldmap_content(proposed, common_index, merge_rule)
