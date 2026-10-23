@@ -10,13 +10,25 @@ hand back for diagnosis.
 
 Run from the ArcGIS Pro Python window so GIS("Pro") can use the
 already-authenticated connection.
+
+Checks services through gis._con.get() instead of a bare
+requests.get(). Two distinct auth bugs showed up with the manual
+approach:
+  - "Token Required" (499) on every single check - a GIS("Pro") login
+    doesn't expose a plain bearer token (gis._con.token comes back
+    empty even though item.get_data() etc. work fine, since Pro
+    manages credentials through its own native bridge), so no token
+    param was ever actually attached.
+  - "Invalid token" (498) on perfectly healthy services - this portal
+    issues referer-locked tokens, so a request without a matching
+    Referer header gets rejected (same gotcha hit in the
+    GIS-Workato-Connector project).
+Letting the Connection make the request itself fixes both.
 """
 
 import json
 import re
-import textwrap
 
-import requests
 from arcgis.gis import GIS
 
 # How many items (across all ITEM_TYPES, in search order) to debug.
@@ -24,7 +36,7 @@ ITEM_LIMIT = 5
 
 gis = GIS("Pro")
 print(f"Logged on as {gis.users.me.username}")
-print(f"Portal URL (used as Referer): {gis.url}\n")
+print(f"Portal URL: {gis.url}\n")
 
 ITEM_TYPES = [
     "Web Map",
@@ -33,8 +45,6 @@ ITEM_TYPES = [
     "StoryMap",
     "Web Experience",
 ]
-
-REQUEST_TIMEOUT = 20
 
 SERVICE_URL_RE = re.compile(
     r"https?://[^\s\"'<>]+?/rest/services/[^\s\"'<>]+?/"
@@ -107,36 +117,20 @@ def gather_json_blobs(item):
 
 
 def check_url(url):
-    params = {"f": "json"}
-    token = getattr(gis._con, "token", None)
-    if token:
-        params["token"] = token
-    headers = {"Referer": gis.url}
-
-    print(f"    -> GET {url}")
-    print(f"       params={{'f': 'json', 'token': {'<set>' if token else None}}}")
-    print(f"       headers={headers}")
+    print(f"    -> gis._con.get({url!r}, {{'f': 'json'}})")
 
     try:
-        resp = requests.get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
-    except requests.RequestException as exc:
-        print(f"       request raised: {exc!r}")
-        return False, f"request failed: {exc}"
+        payload = gis._con.get(url, {"f": "json"})
+    except Exception as exc:
+        print(f"       raised: {exc!r}")
+        return False, f"service error: {exc}"
 
-    print(f"       HTTP {resp.status_code}")
-    print(f"       final url: {resp.url}")
-    body_preview = textwrap.shorten(resp.text, width=800, placeholder=" ...[truncated]")
-    print(f"       body: {body_preview}")
+    dump("response payload", payload)
 
-    if resp.status_code != 200:
-        return False, f"HTTP {resp.status_code}"
-
-    try:
-        payload = resp.json()
-    except ValueError:
+    if not isinstance(payload, dict):
         return False, "non-JSON response (service likely moved/removed)"
 
-    if isinstance(payload, dict) and "error" in payload:
+    if "error" in payload:
         err = payload["error"]
         msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
         return False, f"service error: {msg}"
