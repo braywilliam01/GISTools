@@ -225,6 +225,7 @@ else:
     for item, issues in broken:
         item_url = f"{gis.url.rstrip('/')}/home/item.html?id={item.id}"
         print(f"- {item.title}  [{item.type}]")
+        print(f"    id:    {item.id}")
         print(f"    owner: {item.owner}")
         print(f"    url:   {item_url}")
         for issue_type, reference, detail, layer_labels in issues:
