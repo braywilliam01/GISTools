@@ -8,11 +8,9 @@ removed.
 Run from the ArcGIS Pro Python window so GIS("Pro") can use the
 already-authenticated connection.
 
-Writes a CSV report (one row per broken reference) next to this
-script.
+Prints a clean console report at the end; nothing is written to disk.
 """
 
-import csv
 import datetime
 import re
 
@@ -32,7 +30,6 @@ ITEM_TYPES = [
     "Web Experience",
 ]
 
-OUTPUT_CSV = f"Orphan_Service_Audit_{datetime.date.today():%Y%m%d}.csv"
 REQUEST_TIMEOUT = 20
 
 SERVICE_URL_RE = re.compile(
@@ -179,7 +176,7 @@ for item_type in ITEM_TYPES:
 
 print(f"\nAuditing {len(items)} item(s)...\n")
 
-rows = []
+broken = []
 for i, item in enumerate(items, 1):
     try:
         issues = audit_item(item)
@@ -188,27 +185,28 @@ for i, item in enumerate(items, 1):
 
     if issues:
         print(f"[{i}/{len(items)}] BROKEN: {item.title} ({item.type}) - {len(issues)} issue(s)")
-        for issue_type, reference, detail in issues:
-            rows.append(
-                {
-                    "item_title": item.title,
-                    "item_type": item.type,
-                    "item_id": item.id,
-                    "owner": item.owner,
-                    "item_url": f"{gis.url.rstrip('/')}/home/item.html?id={item.id}",
-                    "issue_type": issue_type,
-                    "reference": reference,
-                    "detail": detail,
-                }
-            )
+        broken.append((item, issues))
 
-if rows:
-    with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(rows)
-    broken_items = len({r["item_id"] for r in rows})
-    print(f"\n{len(rows)} issue(s) across {broken_items} item(s).")
-    print(f"Report written to: {OUTPUT_CSV}")
+# ---------------------------------------------------------------- report --
+
+divider = "=" * 100
+print(f"\n{divider}")
+print(f"ORPHAN SERVICE AUDIT REPORT - {datetime.date.today():%Y-%m-%d}")
+print(divider)
+print(f"Items scanned: {len(items)}   Broken items: {len(broken)}\n")
+
+if not broken:
+    print("No broken references found.")
 else:
-    print("\nNo broken references found.")
+    for item, issues in broken:
+        item_url = f"{gis.url.rstrip('/')}/home/item.html?id={item.id}"
+        print(f"- {item.title}  [{item.type}]")
+        print(f"    owner: {item.owner}")
+        print(f"    url:   {item_url}")
+        for issue_type, reference, detail in issues:
+            label = "service" if issue_type == "service" else "item ref" if issue_type == "item" else "error"
+            print(f"    [{label}] {reference}")
+            print(f"              -> {detail}")
+        print()
+
+print(divider)
