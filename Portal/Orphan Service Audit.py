@@ -223,17 +223,10 @@ if not broken:
     print("No broken references found.")
 else:
     for item, issues in broken:
-        item_url = f"{gis.url.rstrip('/')}/home/item.html?id={item.id}"
-        print(f"- {item.title}  [{item.type}]")
-        print(f"    id:    {item.id}")
-        print(f"    owner: {item.owner}")
-        print(f"    url:   {item_url}")
+        print(f"- {item.title}")
+        print(f"    id: {item.id}")
         for issue_type, reference, detail, layer_labels in issues:
-            label = "service" if issue_type == "service" else "item ref" if issue_type == "item" else "error"
-            print(f"    [{label}] {reference}")
-            if layer_labels:
-                print(f"              layer:  {', '.join(layer_labels)}")
-            print(f"              -> {detail}")
+            print(f"    service: {reference}")
         print()
 
 print(divider)
