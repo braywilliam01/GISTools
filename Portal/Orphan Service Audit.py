@@ -9,12 +9,25 @@ Run from the ArcGIS Pro Python window so GIS("Pro") can use the
 already-authenticated connection.
 
 Prints a clean console report at the end; nothing is written to disk.
+
+Checks services through gis._con.get() instead of a bare
+requests.get() (confirmed live 2026-10-23). Two distinct auth bugs
+showed up with the manual approach:
+  - "Token Required" (499) on every single check - a GIS("Pro") login
+    doesn't expose a plain bearer token (gis._con.token comes back
+    empty even though item.get_data() etc. work fine, since Pro
+    manages credentials through its own native bridge), so no token
+    param was ever actually attached.
+  - "Invalid token" (498) on perfectly healthy services - this portal
+    issues referer-locked tokens, so a request without a matching
+    Referer header gets rejected (same gotcha hit in the
+    GIS-Workato-Connector project).
+Letting the Connection make the request itself fixes both.
 """
 
 import datetime
 import re
 
-import requests
 from arcgis.gis import GIS
 
 gis = GIS("Pro")
@@ -29,8 +42,6 @@ ITEM_TYPES = [
     "StoryMap",
     "Web Experience",
 ]
-
-REQUEST_TIMEOUT = 20
 
 SERVICE_URL_RE = re.compile(
     r"https?://[^\s\"'<>]+?/rest/services/[^\s\"'<>]+?/"
@@ -98,30 +109,19 @@ def check_url(url):
     if url in url_cache:
         return url_cache[url]
 
-    params = {"f": "json"}
-    token = getattr(gis._con, "token", None)
-    if token:
-        params["token"] = token
-
     try:
-        resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
-    except requests.RequestException as exc:
-        url_cache[url] = (False, f"request failed: {exc}")
+        payload = gis._con.get(url, {"f": "json"})
+    except Exception as exc:
+        # Covers both network failures and the error responses
+        # Connection.get() raises on (expired/removed/renamed service).
+        url_cache[url] = (False, f"service error: {exc}")
         return url_cache[url]
 
-    if resp.status_code != 200:
-        url_cache[url] = (False, f"HTTP {resp.status_code}")
-        return url_cache[url]
-
-    try:
-        payload = resp.json()
-    except ValueError:
-        # Non-JSON back from a REST service endpoint almost always
-        # means it redirected to a login/error page - service is gone.
+    if not isinstance(payload, dict):
+        # Non-JSON/non-dict back from a REST service endpoint almost
+        # always means it redirected to a login/error page - gone.
         url_cache[url] = (False, "non-JSON response (service likely moved/removed)")
-        return url_cache[url]
-
-    if isinstance(payload, dict) and "error" in payload:
+    elif "error" in payload:
         err = payload["error"]
         msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
         url_cache[url] = (False, f"service error: {msg}")
