@@ -86,7 +86,7 @@ def create_domains(gdb_path, domains, errors):
             for code_entry in domain["codes"]:
                 code = code_entry["code"]
                 desc = code_entry["description"] or code
-                arcpy.management.AddCodedValueDomain(gdb_path, domain_name, code, desc)
+                arcpy.management.AddCodedValueToDomain(gdb_path, domain_name, code, desc)
         except Exception as e:
             errors.append(f"DOMAIN {domain_name}: {e}")
         if i % 10 == 0 or i == len(domains):
