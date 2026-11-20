@@ -37,7 +37,14 @@ SPATIAL_REFERENCE_WKID = 4326
 OVERWRITE_FIELD_IF_EXISTS = False  # kept False; this is a fresh-build script
 # ----------------------------------------------------------------------
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+try:
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+except NameError:
+    # Happens when this file is run via exec(open(path).read()) in the
+    # ArcGIS Pro Python window - that doesn't set __file__. Either run it
+    # with `import runpy; runpy.run_path(r"path\to\build_18b_gdb.py")`
+    # instead (which does set __file__), or hardcode the folder here:
+    SCRIPT_DIR = r"C:\path\to\this\folder"
 SCHEMA_PATH = os.path.join(SCRIPT_DIR, "faa_18b_schema.json")
 
 
